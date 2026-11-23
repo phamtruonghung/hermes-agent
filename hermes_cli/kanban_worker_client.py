@@ -1,6 +1,9 @@
 """Dispatcher subprocess: submit one claim to its profile owner; never run an agent."""
-# Spawned as a bare ``sys.executable -m``: in a PM install that interpreter carries no dependencies
-# until hermes_bootstrap selects the committed environment, so it must be the first import.
+# Spawned as a bare ``sys.executable -P -m``: in a PM install that interpreter carries no
+# dependencies until hermes_bootstrap selects the committed environment, so it must be the first
+# import. ``-P`` is load-bearing: the worker runs with ``cwd=<workspace>``, so without it
+# ``sys.path[0]`` is the workspace and a Hermes-checkout workspace shadows the installed
+# hermes_bootstrap with its own copy, which refuses ("no dependency environment is committed").
 try:
     import hermes_bootstrap
 except ModuleNotFoundError as exc:
