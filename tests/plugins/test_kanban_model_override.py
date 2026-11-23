@@ -155,7 +155,9 @@ def test_spawn_resolves_claimed_task_policy(
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     kbd._default_spawn(task, str(workspace))
-    assert captured["cmd"] == [sys.executable, "-m", "hermes_cli.kanban_worker_client"]
+    # -P keeps a checkout cwd from shadowing the pinned tree on the client's first
+    # import; -I would also drop the PYTHONPATH pin, so it is not used.
+    assert captured["cmd"] == [sys.executable, "-P", "-m", "hermes_cli.kanban_worker_client"]
     assert captured["env"]["HERMES_HOME"] == str(profile)
     actor = SessionActor("owner", str(profile), frozenset({"session:create"}), "transport")
     connection = SimpleNamespace(
