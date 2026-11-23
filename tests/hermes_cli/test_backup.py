@@ -606,7 +606,7 @@ class TestImport:
         -- listed (capped) in one run, and the command must exit 1 without "restored" wording."""
         hermes_home = self._home_for_corrupt_import(tmp_path, monkeypatch)
         zip_path = tmp_path / "backup.zip"
-        names = [f"skills/s{i}/SKILL.md" for i in range(12)]
+        names = [f"skills/s{i}/SKILL.md" for i in range(52)]
         with zipfile.ZipFile(zip_path, "w", compression=compression) as zf:
             zf.writestr("config.yaml", "model: restored\n")
             for name in names:
@@ -621,8 +621,8 @@ class TestImport:
 
         assert run_import(Namespace(zipfile=str(zip_path), force=True)) == 1
         out = capsys.readouterr().out
-        assert "backup archive is damaged (12 member(s)" in out
-        assert sum(1 for line in out.splitlines() if line.strip().startswith("skills/s")) == 10
+        assert "backup archive is damaged (52 member(s)" in out
+        assert sum(1 for line in out.splitlines() if line.strip().startswith("skills/s")) == 50
         assert "... and 2 more" in out
         assert "Importing" not in out
         assert "restored" not in out.replace("nothing was restored", "")

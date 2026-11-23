@@ -537,13 +537,16 @@ def _write_zip_entries(
     return total_bytes
 
 
+_DETAIL_CAP = 50
+
+
 def _print_capped(header: str, lines: list[str], indent: str) -> None:
-    """Print *header*, then at most 10 of *lines* (each prefixed by *indent*) and a "... and N more" tail."""
+    """Print *header*, then at most ``_DETAIL_CAP`` of *lines* (each prefixed by *indent*) and a "... and N more" tail."""
     print(header)
-    for line in lines[:10]:
+    for line in lines[:_DETAIL_CAP]:
         print(f"{indent}{line}")
-    if len(lines) > 10:
-        print(f"{indent}... and {len(lines) - 10} more")
+    if len(lines) > _DETAIL_CAP:
+        print(f"{indent}... and {len(lines) - _DETAIL_CAP} more")
 
 
 # --- Backup ---
