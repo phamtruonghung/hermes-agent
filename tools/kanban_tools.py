@@ -11,6 +11,7 @@ import functools
 import json
 import logging
 import os
+import re
 import time
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
@@ -659,9 +660,112 @@ def inject_new_comments_from_env(agent: Any) -> bool:
 
 # --- Handlers ---
 
+# --- kanban_show compact view ---
+_SHOW_COMPACT_COMMENTS = 3
+_SHOW_COMPACT_RUNS = 3
+_SHOW_COMPACT_EVENTS = 10
+_SHOW_SUMMARY_CHARS = 300
+_SHOW_EVENT_LINE_CHARS = 200
+_SHOW_KEEP_CHARS = 2000   # retained-for-correctness fields (review reason, result)
+_PR_URL_RE = re.compile(r"https?://[^\s)>\]\"'`]+/pull/\d+")
+_VERDICT_RE = re.compile(r"(?im)^[\s>*_#-]*verdict\b")
+
+
+def _clip(text: Any, limit: int) -> Optional[str]:
+    if text is None:
+        return None
+    text = str(text).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"... [+{len(text) - limit} chars; detail='full' for all]"
+
+
+def _compact_show(kb, conn, tid: str, task) -> dict[str, Any]:
+    comments = list(kb.list_comments(conn, tid))
+    runs = list(kb.list_runs(conn, tid))
+    events = list(kb.list_events(conn, tid))
+
+    def card(pid: str) -> dict[str, Any]:
+        t = kb.get_task(conn, pid)
+        return {"id": pid, "title": t.title if t else None, "status": t.status if t else None}
+
+    row = _fields(task, _TASK_FIELDS)
+    row["result"] = _clip(row.get("result"), _SHOW_KEEP_CHARS)  # body stays in full
+
+    parents = []
+    for pid in kb.parent_ids(conn, tid):
+        entry = card(pid)
+        if entry["status"] == "done":
+            done = [r for r in kb.list_runs(conn, pid) if r.outcome == "completed"]
+            done.sort(key=lambda r: r.started_at, reverse=True)
+            if done and done[0].summary:
+                entry["handoff"] = _clip(done[0].summary, _SHOW_KEEP_CHARS)
+        parents.append(entry)
+
+    tail = comments[-_SHOW_COMPACT_COMMENTS:]
+    older = comments[:-_SHOW_COMPACT_COMMENTS] if len(comments) > _SHOW_COMPACT_COMMENTS else []
+    # Older verdict comments a reviewer/worker relies on survive compact mode.
+    pinned = [c for c in older if _VERDICT_RE.search(c.body or "")][-1:]
+    out: dict[str, Any] = {
+        "detail": "compact",
+        "hint": ("Compact view. Call kanban_show(detail='full') for every comment, run, "
+                 "event and the worker_context."),
+        "task": row,
+        "parents": parents,
+        "unsatisfied_parents": [
+            {"id": pid, "status": status} for pid, status in kb.unsatisfied_parents(conn, tid)],
+        "children": [card(cid) for cid in kb.child_ids(conn, tid)],
+        "attachments": [_fields(a, _ATTACHMENT_FIELDS) for a in kb.list_attachments(conn, tid)],
+        "comments": [_fields(c, _COMMENT_FIELDS) for c in pinned + tail],
+    }
+    if older:
+        omitted = len(older) - len(pinned)
+        out["comments_note"] = (
+            f"{omitted} older comments omitted \u2014 call with detail='full'"
+            + (" (1 older verdict comment is shown first)" if pinned else ""))
+    # The latest review rejection must survive even when it is older than the window.
+    cr = [r for r in runs if r.outcome == "changes_requested"]
+    if cr:
+        out["latest_changes_requested"] = {
+            "run_id": cr[-1].id, "profile": cr[-1].profile, "ended_at": cr[-1].ended_at,
+            "reason": _clip(cr[-1].summary, _SHOW_KEEP_CHARS)}
+    pra = [e for e in events if e.kind == "pr_acceptance"]
+    if pra:
+        out["latest_pr_acceptance"] = {
+            "created_at": pra[-1].created_at,
+            "payload": _clip(json.dumps(pra[-1].payload, default=str), _SHOW_KEEP_CHARS)}
+    blobs = [task.result or ""] + [
+        f"{r.summary or ''} {json.dumps(r.metadata, default=str) if r.metadata else ''}" for r in runs
+    ] + [c.body or "" for c in comments]
+    links: list[str] = []
+    for blob in reversed(blobs):
+        for m in reversed(_PR_URL_RE.findall(blob)):
+            if m not in links:
+                links.append(m)
+    if links:
+        out["pr_links"] = links[:5]
+    out["runs"] = [
+        {"id": r.id, "profile": r.profile, "status": r.status, "outcome": r.outcome,
+         "summary": _clip(r.summary, _SHOW_SUMMARY_CHARS),
+         "error": _clip(r.error, _SHOW_SUMMARY_CHARS),
+         "started_at": r.started_at, "ended_at": r.ended_at}
+        for r in runs[-_SHOW_COMPACT_RUNS:]]
+    if len(runs) > _SHOW_COMPACT_RUNS:
+        out["runs_note"] = f"{len(runs) - _SHOW_COMPACT_RUNS} older runs omitted \u2014 call with detail='full'"
+    out["events"] = [
+        f"#{e.id} {e.created_at} {e.kind}"
+        + (f" {_clip(json.dumps(e.payload, default=str, ensure_ascii=False), _SHOW_EVENT_LINE_CHARS)}"
+           if e.payload else "")
+        for e in events[-_SHOW_COMPACT_EVENTS:]]
+    if len(events) > _SHOW_COMPACT_EVENTS:
+        out["events_note"] = f"{len(events) - _SHOW_COMPACT_EVENTS} older events omitted \u2014 call with detail='full'"
+    return out
+
+
 @_kanban_handler("kanban_show")
 def _handle_show(args: dict, **kw) -> str:
-    """Full task state: row, parents, children, comments, runs, last 50 events."""
+    """Task state. ``detail="compact"`` (default) is a token-cheap view; ``"full"``: row,
+    parents, children, comments, runs, last 50 events, worker_context."""
     tid = _default_task_id(args.get("task_id"))
     if not tid:
         # No dispatcher task in scope and no explicit id: the caller asked "what
@@ -674,8 +778,13 @@ def _handle_show(args: dict, **kw) -> str:
                 "task to show by default. Call kanban_list to see task ids on "
                 "the board, then kanban_show(task_id=<id>) for full state."),
         })
+    detail = args.get("detail")
+    detail = "compact" if detail is None else str(detail).strip().lower()
+    _check(detail in ("compact", "full"), "detail must be 'compact' or 'full'")
     with _board(args.get("board")) as (kb, conn):
         task = _existing_task(kb, conn, tid)
+        if detail == "compact":
+            return json.dumps(_compact_show(kb, conn, tid, task))
         return json.dumps({
             "task": _fields(task, _TASK_FIELDS),
             "parents": kb.parent_ids(conn, tid),

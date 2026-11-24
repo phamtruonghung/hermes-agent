@@ -47,16 +47,23 @@ def _schema(name: str, description: str, properties: dict[str, Any], required: l
 KANBAN_SHOW_SCHEMA = _schema(
     "kanban_show",
     (
-        "Read a task's full state: body, assignee, parent handoffs, attempts, comments. "
-        "It also carries the title and recent events. Use this to (re)orient yourself before "
-        "starting work, especially on retries. The response includes a "
-        "pre-formatted ``worker_context`` string suitable for inclusion "
-        "verbatim in your reasoning. Outside a dispatcher-spawned worker "
+        "Read a task's state: full body, assignee, parent/child cards, latest comments, "
+        "recent attempts and events. Default detail='compact' returns the full body, the 3 newest "
+        "comments, the last 3 runs, the last 10 events, the latest changes_requested reason and PR "
+        "links, with counters for what was omitted. Pass detail='full' only when you need the "
+        "older comments, run or event history, or the pre-formatted ``worker_context`` string "
+        "(retries, audits, reviews of long threads). Use this to (re)orient yourself before "
+        "starting work, especially on retries. Outside a dispatcher-spawned worker "
         "there is no default task: a bare call returns a pointer to "
         "``kanban_list`` instead of task state."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
+        "detail": {
+            "type": "string", "enum": ["compact", "full"],
+            "description": "'compact' (default) is a token-cheap view; 'full' returns every "
+                           "comment, run, last 50 events and worker_context.",
+        },
     },
     [],
 )

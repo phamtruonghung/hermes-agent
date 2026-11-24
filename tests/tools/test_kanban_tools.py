@@ -73,7 +73,7 @@ def worker_env(monkeypatch, tmp_path):
 
 def test_show_defaults_to_env_task_id(worker_env):
     from tools import kanban_tools as kt
-    out = kt._handle_show({})
+    out = kt._handle_show({"detail": "full"})
     d = json.loads(out)
     assert "task" in d
     assert d["task"]["id"] == worker_env
@@ -1483,3 +1483,118 @@ class TestDefaultTaskId:
         assert kt._default_task_id("") == worker_env
         assert kt._default_task_id("   ") == worker_env
         assert kt._default_task_id(None) == worker_env
+
+
+# ---------------------------------------------------------------------------
+# kanban_show compact vs full
+# ---------------------------------------------------------------------------
+
+def _seed_long_card(tid, *, comments=20, runs=10, events=50):
+    """Realistic long history; returns the changes_requested reason planted early."""
+    import time
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    reason = "REJECTED: acceptance criterion 2 fails, see https://github.com/acme/app/pull/77"
+    conn = kbc.connect()
+    try:
+        with kb.write_txn(conn) if hasattr(kb, "write_txn") else conn:
+            conn.execute("UPDATE tasks SET body = ? WHERE id = ?",
+                         ("SPEC\n" + "acceptance criterion line\n" * 200, tid))
+            for i in range(runs):
+                outcome = "changes_requested" if i == 1 else "completed"
+                summary = reason if i == 1 else f"run {i} " + "details " * 150
+                conn.execute(
+                    "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, "
+                    "outcome, summary) VALUES (?, 'dev', 'done', ?, ?, ?, ?)",
+                    (tid, 1000 + i, 1001 + i, outcome, summary))
+            for i in range(events):
+                conn.execute(
+                    "INSERT INTO task_events (task_id, kind, payload, created_at) "
+                    "VALUES (?, 'heartbeat', ?, ?)",
+                    (tid, json.dumps({"note": f"beat {i} " + "x" * 80}), 2000 + i))
+        for i in range(comments):
+            kb.add_comment(conn, tid, "reviewer", f"comment {i} " + "lorem ipsum " * 60)
+    finally:
+        conn.close()
+    return reason
+
+
+def test_show_compact_is_default_and_full_is_opt_in(worker_env):
+    from tools import kanban_tools as kt
+    d = json.loads(kt._handle_show({}))
+    assert d["detail"] == "compact"
+    assert "detail='full'" in d["hint"]
+    assert "worker_context" not in d
+    full = json.loads(kt._handle_show({"detail": "full"}))
+    assert "worker_context" in full and "detail" not in full
+    assert "error" in json.loads(kt._handle_show({"detail": "bogus"}))
+
+
+def test_show_full_matches_legacy_output_byte_for_byte(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+    _seed_long_card(worker_env)
+    tid = worker_env
+    with kt._board(None) as (kb, conn):
+        task = kt._existing_task(kb, conn, tid)
+        legacy = json.dumps({
+            "task": kt._fields(task, kt._TASK_FIELDS),
+            "parents": kb.parent_ids(conn, tid),
+            "unsatisfied_parents": [
+                {"id": pid, "status": status} for pid, status in kb.unsatisfied_parents(conn, tid)],
+            "children": kb.child_ids(conn, tid),
+            "comments": [kt._fields(c, kt._COMMENT_FIELDS) for c in kb.list_comments(conn, tid)],
+            "events": [kt._fields(e, kt._EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
+            "runs": [kt._fields(r, kt._RUN_FIELDS) for r in kb.list_runs(conn, tid)],
+            "worker_context": kb.build_worker_context(conn, tid)})
+    assert kt._handle_show({"detail": "full"}) == legacy
+
+
+def test_show_compact_limits_and_omission_counters(worker_env):
+    from tools import kanban_tools as kt
+    _seed_long_card(worker_env, comments=20, runs=10, events=50)
+    d = json.loads(kt._handle_show({}))
+    assert len(d["comments"]) == 3
+    assert [c["body"].split()[1] for c in d["comments"]] == ["17", "18", "19"]
+    assert d["comments_note"].startswith("17 older comments omitted")
+    assert "detail='full'" in d["comments_note"]
+    assert len(d["runs"]) == 3 and "8 older runs omitted" in d["runs_note"]  # 10 seeded + the live run
+    assert all(len(r["summary"] or "") < 400 for r in d["runs"])
+    assert len(d["events"]) == 10 and "older events omitted" in d["events_note"]
+    # body is never truncated
+    assert d["task"]["body"].count("acceptance criterion line") == 200
+
+
+def test_show_compact_keeps_old_changes_requested_reason_and_pr_link(worker_env):
+    from tools import kanban_tools as kt
+    reason = _seed_long_card(worker_env)
+    d = json.loads(kt._handle_show({}))
+    assert all(r["outcome"] != "changes_requested" for r in d["runs"])  # outside window
+    assert d["latest_changes_requested"]["reason"] == reason
+    assert "https://github.com/acme/app/pull/77" in d["pr_links"]
+
+
+def test_show_compact_keeps_older_verdict_comment(worker_env):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+    conn = kbc.connect()
+    try:
+        kb.add_comment(conn, worker_env, "rev", "Verdict: APPROVE-WITH-NITS\nbecause")
+        for i in range(5):
+            kb.add_comment(conn, worker_env, "rev", f"chatter {i}")
+    finally:
+        conn.close()
+    d = json.loads(kt._handle_show({}))
+    assert d["comments"][0]["body"].startswith("Verdict:")
+    assert d["comments_note"].startswith("2 older comments omitted")
+
+
+def test_show_compact_reduces_size_on_realistic_card(worker_env, capsys):
+    from tools import kanban_tools as kt
+    _seed_long_card(worker_env, comments=20, runs=10, events=50)
+    compact = len(kt._handle_show({}))
+    full = len(kt._handle_show({"detail": "full"}))
+    with capsys.disabled():
+        print(f"\nkanban_show sizes: full={full} compact={compact} ({compact / full:.0%})")
+    assert compact < full * 0.5
