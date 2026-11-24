@@ -162,3 +162,17 @@ Every former god file is a **facade** (public entry points + the names other pac
 
 Long-form background: `website/docs/developer-guide/`. Workflow rules (PR/issue/review/salvage
 process) live in the `hermes-agent-dev` skill, not here.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on this fork (`gh`; product bugs go upstream to NousResearch). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage labels, strings unchanged. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/`. See `docs/agents/domain.md`.
