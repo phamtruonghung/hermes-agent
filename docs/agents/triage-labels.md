@@ -1,7 +1,7 @@
 # Triage Labels
 
 The skills speak in terms of five canonical triage roles. This file maps those roles to the actual
-label strings used in this repo's issue tracker (`phamtruonghung/hermes-agent`, see
+label strings used in this repo's issue tracker (upstream `NousResearch/hermes-agent`, see
 `docs/agents/issue-tracker.md`).
 
 | Label in mattpocock/skills | Label in our tracker | Meaning                                  |
@@ -17,15 +17,18 @@ string from this table. Our strings are the canonical ones, so the two columns s
 
 ## State of the labels on this tracker
 
-Measured at `b7db40d8` with `gh label list --repo phamtruonghung/hermes-agent`:
-
-- `wontfix` **exists** (GitHub's default set).
-- `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human` **do not exist yet**. Create one
-  before applying it, or `gh issue edit --add-label` creates nothing and fails:
+The fork `phamtruonghung/hermes-agent` has **issues disabled**
+(`gh api repos/phamtruonghung/hermes-agent --jq .has_issues` → `false`), so its labels can only tag
+fork PRs. `gh label list` still answers on the fork (labels are repo metadata); that does not mean an
+issue can be labelled there. Issue triage labels live on upstream `NousResearch/hermes-agent`;
+measured at `795d986f` (`gh api repos/NousResearch/hermes-agent/labels --paginate`), `wontfix` and
+`bug` exist there, while `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human` **do
+not**. Creating one needs upstream write access; without the label, `gh issue edit --add-label`
+creates nothing and fails:
 
 ```bash
 for l in needs-triage needs-info ready-for-agent ready-for-human; do
-  gh label create "$l" --repo phamtruonghung/hermes-agent
+  gh label create "$l" --repo NousResearch/hermes-agent
 done
 ```
 
