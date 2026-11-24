@@ -28,8 +28,8 @@ suggest creating them upfront. `/domain-modeling` (reached via `/grill-with-docs
 
 - **`CONTEXT.md`** at the repo root, when it exists.
 - **`docs/adr/`** — read the ADRs touching the area you're about to work in, when they exist.
-- **The root `AGENTS.md`** and the **area `AGENTS.md`** for the directory you are entering (15 are
-  tracked: `agent/`, `gateway/`, `tools/`, `plugins/`, `hermes_cli/`, `hermes_platform/`, `pm/`,
+- **The root `AGENTS.md`** and the **area `AGENTS.md`** for the directory you are entering (14 area
+  files: `agent/`, `gateway/`, `tools/`, `plugins/`, `hermes_cli/`, `hermes_platform/`, `pm/`,
   `skills/`, `cron/`, `tests/`, `web/`, `tui_gateway/`, `apps/desktop/`, `apps/desktop/src/`). The
   root file's Routing Table maps an area to the file to read. **These area files are the closest
   thing this repo has to context docs today — read them before the source.**

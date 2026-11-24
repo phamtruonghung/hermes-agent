@@ -167,7 +167,7 @@ process) live in the `hermes-agent-dev` skill, not here.
 
 ### Issue tracker
 
-GitHub Issues on this fork (`gh`; product bugs go upstream to NousResearch). See `docs/agents/issue-tracker.md`.
+Issues go upstream to `NousResearch/hermes-agent` (fork has issues disabled); fork work lands as PRs. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
