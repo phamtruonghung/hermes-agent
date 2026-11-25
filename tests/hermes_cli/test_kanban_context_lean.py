@@ -7,6 +7,8 @@ reached and the files touched. Both reshapes have an off switch that restores th
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -141,3 +143,79 @@ def test_normal_failure_retry_has_no_resume_block(conn):
     _interrupt(conn, tid, outcome="blocked")
     assert kb.claim_task(conn, tid) is not None
     assert "## Resume handoff" not in kb.build_worker_context(conn, tid)
+
+
+def _session_db(path: Path, rows) -> Path:
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, tool_calls TEXT)")
+    for role, content, calls in rows:
+        db.execute("INSERT INTO messages VALUES ('s1', ?, ?, ?)", (role, content, json.dumps(calls) if calls else None))
+    db.commit()
+    db.close()
+    return path
+
+
+def _admit(conn, tid, db, **extra):
+    run = conn.execute("SELECT current_run_id FROM tasks WHERE id=?", (tid,)).fetchone()[0]
+    with kb.write_txn(conn):
+        kb._append_event(conn, tid, "owner_admitted", {"db": str(db), "session_id": "s1"}, run_id=run)
+        if extra:
+            kb._append_event(conn, tid, "worker_result", extra, run_id=run)
+
+
+_EDIT_ROWS = [
+    ("assistant", "", [
+        {"function": {"name": "write_file", "arguments": '{"path": "/x/a.py", "content": "1"}'}},
+        {"function": {"name": "patch", "arguments": {"path": "/x/b.py"}}},
+        {"name": "write_file", "arguments": {"path": "/x/a.py"}},
+    ]),
+    ("assistant", "halfway: b.py patched, tests next", None),
+]
+
+
+def test_resume_handoff_lists_session_edits_and_last_output(conn, tmp_path):
+    tid = _card(conn, workspace_kind="scratch")
+    _admit(conn, tid, _session_db(tmp_path / "state.db", _EDIT_ROWS))
+    _interrupt(conn, tid, outcome="reclaimed")
+    assert kb.claim_task(conn, tid) is not None
+    block = kb.build_worker_context(conn, tid).split("## Resume handoff", 1)[1]
+    assert block.count("/x/a.py") == 1 and block.count("/x/b.py") == 1
+    assert block.index("/x/a.py") < block.index("/x/b.py")
+    assert "halfway: b.py patched, tests next" in block
+
+
+def test_resume_handoff_prefers_worker_result_last_output(conn, tmp_path):
+    tid = _card(conn, workspace_kind="scratch")
+    _admit(conn, tid, _session_db(tmp_path / "state.db", _EDIT_ROWS), last_output="FINAL-FROM-RESULT")
+    _interrupt(conn, tid, outcome="reclaimed")
+    assert kb.claim_task(conn, tid) is not None
+    ctx = kb.build_worker_context(conn, tid)
+    assert "FINAL-FROM-RESULT" in ctx and "halfway: b.py" not in ctx
+
+
+def test_resume_handoff_survives_missing_session_db(conn, tmp_path):
+    tid = _card(conn, workspace_kind="scratch")
+    _admit(conn, tid, tmp_path / "nope" / "state.db")
+    _interrupt(conn, tid, outcome="reclaimed")
+    assert kb.claim_task(conn, tid) is not None
+    ctx = kb.build_worker_context(conn, tid)
+    assert "## Resume handoff" in ctx
+    assert "Files the interrupted run edited" not in ctx and "Last output" not in ctx
+
+
+def test_resume_handoff_skips_failed_turn_copy_as_last_output(conn, tmp_path):
+    db = sqlite3.connect(tmp_path / "state.db")
+    db.execute("CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, tool_calls TEXT, display_kind TEXT)")
+    db.executemany("INSERT INTO messages VALUES ('s1', 'assistant', ?, NULL, ?)", [
+        ("real progress: parser done", None),
+        ("An automated delivery was interrupted and was not run again", "failed_turn"),
+    ])
+    db.commit()
+    db.close()
+    tid = _card(conn, workspace_kind="scratch")
+    _admit(conn, tid, tmp_path / "state.db")
+    _interrupt(conn, tid, outcome="reclaimed")
+    assert kb.claim_task(conn, tid) is not None
+    ctx = kb.build_worker_context(conn, tid)
+    assert "- Last output: real progress: parser done" in ctx
+    assert "An automated delivery was interrupted" not in ctx
