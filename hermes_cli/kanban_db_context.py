@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 import hermes_cli.kanban_db as _kb
@@ -36,7 +37,8 @@ _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # per comment
 #   * a reviewer run opens with a review brief (implementer handoff, latest changes_requested reason,
 #     diff stat, last 3 comments) instead of every prior attempt + 30 comments + role history;
 #   * a retry after an interrupted run (rate_limited / reclaimed / crashed / timed_out) opens with a
-#     resume handoff (last summary, step reached, files touched) instead of starting cold.
+#     resume handoff (last summary, step reached, files touched per git and per the run's own session)
+#     instead of starting cold.
 # Off switches: `hermes config set kanban.lean_review_context false`, `kanban.resume_handoff false`
 # (or env HERMES_KANBAN_LEAN_REVIEW_CONTEXT=0 / HERMES_KANBAN_RESUME_HANDOFF=0).
 _CTX_LEAN_COMMENTS       = 3
@@ -46,6 +48,7 @@ _CTX_LEAN_REASON_BYTES   = 2000
 _CTX_RESUME_SUMMARY_BYTES = 1500
 _CTX_RESUME_NOTES        = 3
 _CTX_RESUME_NOTE_BYTES   = 300
+_CTX_RESUME_FILES        = 20
 _CTX_GIT_LINES           = 25
 _RESUME_OUTCOMES = frozenset({"rate_limited", "reclaimed", "crashed", "timed_out", "stale", "spawn_failed"})
 
@@ -293,6 +296,62 @@ def _ctx_review_brief(lines: list[str], task: Task, all_prior: list, now: int) -
         lines.append("")
 
 
+def _run_event_payload(conn: sqlite3.Connection, task_id: str, run_id: int, kind: str) -> dict:
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND run_id = ? AND kind = ? "
+        "AND payload IS NOT NULL ORDER BY id DESC LIMIT 1", (task_id, run_id, kind)).fetchone()
+    payload = json.loads(row[0]) if row else None
+    return payload if isinstance(payload, dict) else {}
+
+
+def _prior_session_facts(session_conn: sqlite3.Connection, session_id: Any) -> tuple[list[str], str]:
+    """(distinct paths edited via write_file/patch in first-edit order, last non-empty assistant text)."""
+    files: dict[str, None] = {}
+    last_text = ""
+    for role, content, tool_calls in session_conn.execute(
+        "SELECT role, content, tool_calls FROM messages WHERE session_id = ? ORDER BY rowid", (session_id,),
+    ):
+        if role != "assistant":
+            continue
+        if isinstance(content, str) and content.strip():
+            last_text = content
+        try:
+            calls = json.loads(tool_calls) if tool_calls else []
+        except (TypeError, ValueError):
+            continue
+        for call in calls if isinstance(calls, list) else []:
+            fn = call.get("function", call) if isinstance(call, dict) else {}
+            if fn.get("name") not in ("write_file", "patch"):
+                continue
+            args = fn.get("arguments")
+            try:
+                args = json.loads(args) if isinstance(args, str) else args
+            except ValueError:
+                continue
+            path = args.get("path") if isinstance(args, dict) else None
+            if isinstance(path, str) and path.strip():
+                files.setdefault(path.strip())
+    return list(files), last_text
+
+
+def _prior_run_facts(conn: sqlite3.Connection, task_id: str, run_id: int) -> tuple[list[str], str]:
+    """Best-effort (edited files, last output) of the interrupted run, read from its own session DB."""
+    files: list[str] = []
+    text = ""
+    try:
+        text = str(_run_event_payload(conn, task_id, run_id, "worker_result").get("last_output") or "")
+        admitted = _run_event_payload(conn, task_id, run_id, "owner_admitted")
+        session_conn = sqlite3.connect(Path(admitted["db"]).as_uri() + "?mode=ro", uri=True, timeout=2)
+        try:
+            files, session_text = _prior_session_facts(session_conn, admitted["session_id"])
+        finally:
+            session_conn.close()
+        text = text if text.strip() else session_text
+    except Exception:  # health: allow BLE001 -- best-effort: an old or foreign session DB must never fail the context
+        pass
+    return files, text
+
+
 def _ctx_resume_handoff(lines: list[str], conn: sqlite3.Connection, task: Task, last, now: int) -> None:
     """The retry's opening facts after an interrupted run: last summary, step reached, files touched."""
     lines.append(f"## Resume handoff — the previous run was interrupted ({last.outcome})")
@@ -304,6 +363,14 @@ def _ctx_resume_handoff(lines: list[str], conn: sqlite3.Connection, task: Task, 
         lines.append("- Summary: " + _ctx_cap(last.summary, _CTX_RESUME_SUMMARY_BYTES))
     if last.error and last.error.strip():
         lines.append("- Ended with: " + _ctx_cap(last.error, 300))
+    files, last_text = _prior_run_facts(conn, task.id, last.id)
+    if files:
+        lines.append("- Files the interrupted run edited (write_file/patch, from its session):")
+        lines.extend(f"  - {p[:200]}" for p in files[:_CTX_RESUME_FILES])
+        if len(files) > _CTX_RESUME_FILES:
+            lines.append(f"  - ... ({len(files) - _CTX_RESUME_FILES} more)")
+    if last_text and not (last.summary and last.summary.strip()):
+        lines.append("- Last output: " + _ctx_cap(last_text, _CTX_RESUME_SUMMARY_BYTES))
     notes: list[str] = []
     for row in conn.execute(
         "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'heartbeat' AND payload IS NOT NULL "
