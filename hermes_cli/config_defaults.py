@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- registers the five kanban.worker_context ceilings (data only, no logic)
 """Default configuration data for Hermes Agent: DEFAULT_CONFIG and OPTIONAL_ENV_VARS.
 
 Pure-data leaf module — must not import from hermes_cli.config. Comments are the user-facing
@@ -1889,6 +1890,16 @@ DEFAULT_CONFIG = {
         # early failure evidence from long-running workers.
         "worker_log_rotate_bytes": 2 * 1024 * 1024,
         "worker_log_backup_count": 1,
+        # Ceilings on the opening context a worker replays on EVERY model call (lower = cheaper
+        # turns). Values must be ints >= 1, else the default applies. The full thread stays
+        # available through kanban_show detail='full'.
+        "worker_context": {
+            "max_comments": 30,
+            "max_prior_attempts": 10,
+            "max_field_bytes": 4096,
+            "max_body_bytes": 8192,
+            "max_comment_bytes": 2048,
+        },
         # Profile for the root/orchestration task after Triage decomposition; "" = default profile.
         # Does not control the decomposer LLM path (see auxiliary.kanban_decomposer).
         "orchestrator_profile": "",
