@@ -27,6 +27,14 @@ _CTX_MAX_COMMENTS       = 30      # most recent N comments shown in full
 _CTX_MAX_FIELD_BYTES    = 4 * 1024   # per summary/error/metadata/result
 _CTX_MAX_BODY_BYTES     = 8 * 1024   # per task.body (opening post)
 _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # per comment
+# `kanban.worker_context.<key>` overrides these defaults (see _worker_context_limits).
+_CTX_LIMIT_DEFAULTS = {
+    "max_prior_attempts": _CTX_MAX_PRIOR_ATTEMPTS,
+    "max_comments": _CTX_MAX_COMMENTS,
+    "max_field_bytes": _CTX_MAX_FIELD_BYTES,
+    "max_body_bytes": _CTX_MAX_BODY_BYTES,
+    "max_comment_bytes": _CTX_MAX_COMMENT_BYTES,
+}
 
 
 # --- lean review brief + resume handoff (2026-11-25, token saving) --------------------------------
@@ -80,6 +88,56 @@ def _flag(name: str) -> bool:
     return True
 
 
+def _worker_context_block(cfg: Any) -> Optional[dict]:
+    kanban = cfg.get("kanban") if isinstance(cfg, dict) else None
+    block = kanban.get("worker_context") if isinstance(kanban, dict) else None
+    return block if isinstance(block, dict) else None
+
+
+def _worker_context_blocks() -> list[dict]:
+    """``kanban.worker_context`` from the active profile's user config, then the root config.
+    An unreadable config is skipped: a context must always render."""
+    from pathlib import Path
+
+    import yaml
+
+    from hermes_cli.config_backend import ConfigBackendUnavailable, read_config_doc
+    from hermes_cli.config_effective import load_user_config_effective
+    from hermes_constants import get_default_hermes_root
+
+    sources = (
+        load_user_config_effective,
+        lambda: read_config_doc(Path(str(get_default_hermes_root())) / "config.yaml"),
+    )
+    blocks = []
+    for load in sources:
+        try:
+            block = _worker_context_block(load())
+        except (OSError, ValueError, yaml.YAMLError, ConfigBackendUnavailable):
+            continue
+        if block is not None:
+            blocks.append(block)
+    return blocks
+
+
+def _worker_context_limits() -> dict[str, int]:
+    """Effective ceilings: per key the first valid (int >= 1, not bool) configured value, else the default."""
+    blocks = _worker_context_blocks()
+    limits = dict(_CTX_LIMIT_DEFAULTS)
+    for key in limits:
+        for block in blocks:
+            val = block.get(key)
+            if isinstance(val, int) and not isinstance(val, bool) and val >= 1:
+                limits[key] = val
+                break
+    return limits
+
+
+def _limit(key: str) -> int:
+    """The current render's ceiling for ``key`` (the constant default outside a render)."""
+    return getattr(_MODE, "limits", _CTX_LIMIT_DEFAULTS)[key]
+
+
 def _git_lines(path: Optional[str], *args: str, cap: int = _CTX_GIT_LINES) -> list[str]:
     """Bounded `git -C path ...` output lines; [] on any failure (a context must never fail to render)."""
     if not path or not os.path.isdir(path):
@@ -125,10 +183,12 @@ def _relative_age(ts: Optional[int], now: Optional[int] = None) -> str:
     return f"{delta // 86400}d ago"
 
 
-def _ctx_cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
+def _ctx_cap(s: Optional[str], limit: Optional[int] = None) -> str:
     """Truncate to ``limit`` chars with a visible ellipsis."""
     if not s:
         return ""
+    if limit is None:
+        limit = _limit("max_field_bytes")
     s = s.strip()
     if len(s) <= limit:
         return s
@@ -165,6 +225,7 @@ def _ctx_tail(items: list, cap: int, noun: str) -> tuple[list, Optional[str]]:
 def _ctx_header(lines: list[str], task: Task) -> None:
     _MODE.review = False
     _MODE.resume = False
+    _MODE.limits = _worker_context_limits()
     lines.append(f"# Kanban task {task.id}: {task.title}")
     lines.append("")
     lines.append(f"Assignee: {task.assignee or '(unassigned)'}")
@@ -185,7 +246,7 @@ def _ctx_header(lines: list[str], task: Task) -> None:
     lines.append("")
     if task.body and task.body.strip():
         lines.append("## Body")
-        lines.append(_ctx_cap(task.body, _CTX_MAX_BODY_BYTES))
+        lines.append(_ctx_cap(task.body, _limit("max_body_bytes")))
         lines.append("")
 
 
@@ -209,7 +270,7 @@ def _ctx_attachments(lines: list[str], attachments: list[Attachment]) -> None:
 
 def _ctx_prior_attempts(lines: list[str], conn: sqlite3.Connection, task_id: str, now: int) -> None:
     """Closed runs on this task (the active run is this worker), newest
-    ``_CTX_MAX_PRIOR_ATTEMPTS`` in full, older ones as a one-line marker."""
+    ``max_prior_attempts`` in full, older ones as a one-line marker."""
     all_prior = [r for r in _kb.list_runs(conn, task_id) if r.ended_at is not None]
     task = _kb.get_task(conn, task_id)
     if task is not None and _flag("lean_review_context") and _is_review_run(conn, task):
@@ -223,7 +284,7 @@ def _ctx_prior_attempts(lines: list[str], conn: sqlite3.Connection, task_id: str
     if resume:
         _MODE.resume = True
         _ctx_resume_handoff(lines, conn, task, last_work, now)
-    shown, omitted_note = _ctx_tail(all_prior, _CTX_MAX_PRIOR_ATTEMPTS, "attempt")
+    shown, omitted_note = _ctx_tail(all_prior, _limit("max_prior_attempts"), "attempt")
     if not shown:
         return
     first_shown_idx = len(all_prior) - len(shown) + 1
@@ -284,7 +345,7 @@ def _ctx_review_brief(lines: list[str], task: Task, all_prior: list, now: int) -
         lines.append("")
     older = [r for r in all_prior if r is not handoff and r is not reason]
     if older:
-        shown, omitted = _ctx_tail(older, _CTX_MAX_PRIOR_ATTEMPTS, "attempt")
+        shown, omitted = _ctx_tail(older, _limit("max_prior_attempts"), "attempt")
         lines.append("### Earlier attempts (outcome only)")
         if omitted:
             lines.append(omitted)
@@ -403,12 +464,12 @@ def _ctx_role_history(lines: list[str], conn: sqlite3.Connection, task: Task, no
 
 
 def _ctx_comments(lines: list[str], comments: list[Comment], now: int) -> None:
-    """Newest ``_CTX_MAX_COMMENTS`` comments. The explicit "comment from
+    """Newest ``max_comments`` comments. The explicit "comment from
     worker" framing stops an operator-controlled HERMES_PROFILE like
     "hermes-system" being read as a system directive above an
     attacker-influenceable body (defense-in-depth)."""
     lean = getattr(_MODE, "review", False)
-    shown, omitted_note = _ctx_tail(comments, _CTX_LEAN_COMMENTS if lean else _CTX_MAX_COMMENTS, "comment")
+    shown, omitted_note = _ctx_tail(comments, _CTX_LEAN_COMMENTS if lean else _limit("max_comments"), "comment")
     if not shown:
         return
     lines.append("## Comment thread")
@@ -421,5 +482,5 @@ def _ctx_comments(lines: list[str], comments: list[Comment], now: int) -> None:
         # author-forgery surface was already closed in #22435. See #22452.
         safe_author = (c.author or "").replace("`", "")
         lines.append(f"comment from worker `{safe_author}` at {_ctx_stamp(c.created_at, now)}:")
-        lines.append(_ctx_cap(c.body, _CTX_LEAN_COMMENT_BYTES if lean else _CTX_MAX_COMMENT_BYTES))
+        lines.append(_ctx_cap(c.body, _CTX_LEAN_COMMENT_BYTES if lean else _limit("max_comment_bytes")))
         lines.append("")

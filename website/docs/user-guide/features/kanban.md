@@ -1023,6 +1023,18 @@ kanban:
   default_workdir: ~/work/active-project
 ```
 
+### Worker context ceilings
+
+Every model call a worker makes replays its opening context, so its size is paid per call. The ceilings below bound what the context renders; lower values make turns cheaper. The full thread stays available through `kanban_show` with `detail='full'`. Each value must be an integer of at least 1; anything else falls back to the default.
+
+| Config key | Default | What it bounds |
+|------------|---------|----------------|
+| `kanban.worker_context.max_comments` | `30` | Most recent comments shown (older ones collapse into an "omitted" note). |
+| `kanban.worker_context.max_prior_attempts` | `10` | Most recent prior runs shown in full. |
+| `kanban.worker_context.max_field_bytes` | `4096` | Characters kept per run summary, error, metadata and parent result. |
+| `kanban.worker_context.max_body_bytes` | `8192` | Characters kept of the task body. |
+| `kanban.worker_context.max_comment_bytes` | `2048` | Characters kept per comment. |
+
 ### Scheduled task starts (`scheduled_at`)
 
 Set `scheduled_at` on a task to delay dispatch until a specific time. The dispatcher skips ready tasks whose `scheduled_at` is in the future and picks them up on the first tick after that timestamp.
