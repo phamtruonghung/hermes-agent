@@ -201,3 +201,21 @@ def test_resume_handoff_survives_missing_session_db(conn, tmp_path):
     ctx = kb.build_worker_context(conn, tid)
     assert "## Resume handoff" in ctx
     assert "Files the interrupted run edited" not in ctx and "Last output" not in ctx
+
+
+def test_resume_handoff_skips_failed_turn_copy_as_last_output(conn, tmp_path):
+    db = sqlite3.connect(tmp_path / "state.db")
+    db.execute("CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, tool_calls TEXT, display_kind TEXT)")
+    db.executemany("INSERT INTO messages VALUES ('s1', 'assistant', ?, NULL, ?)", [
+        ("real progress: parser done", None),
+        ("An automated delivery was interrupted and was not run again", "failed_turn"),
+    ])
+    db.commit()
+    db.close()
+    tid = _card(conn, workspace_kind="scratch")
+    _admit(conn, tid, tmp_path / "state.db")
+    _interrupt(conn, tid, outcome="reclaimed")
+    assert kb.claim_task(conn, tid) is not None
+    ctx = kb.build_worker_context(conn, tid)
+    assert "- Last output: real progress: parser done" in ctx
+    assert "An automated delivery was interrupted" not in ctx

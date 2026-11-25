@@ -308,12 +308,16 @@ def _prior_session_facts(session_conn: sqlite3.Connection, session_id: Any) -> t
     """(distinct paths edited via write_file/patch in first-edit order, last non-empty assistant text)."""
     files: dict[str, None] = {}
     last_text = ""
-    for role, content, tool_calls in session_conn.execute(
-        "SELECT role, content, tool_calls FROM messages WHERE session_id = ? ORDER BY rowid", (session_id,),
+    # The failed-turn copy (agent/turn_failure_copy.py) is a synthetic notice, not the run's own output.
+    cols = {row[1] for row in session_conn.execute("PRAGMA table_info(messages)")}
+    kind_col = "display_kind" if "display_kind" in cols else "NULL"
+    for role, content, tool_calls, display_kind in session_conn.execute(
+        f"SELECT role, content, tool_calls, {kind_col} FROM messages WHERE session_id = ? ORDER BY rowid",
+        (session_id,),
     ):
         if role != "assistant":
             continue
-        if isinstance(content, str) and content.strip():
+        if isinstance(content, str) and content.strip() and display_kind != "failed_turn":
             last_text = content
         try:
             calls = json.loads(tool_calls) if tool_calls else []
